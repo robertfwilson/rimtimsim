@@ -11,7 +11,7 @@ from astropy.time import Time, TimeDelta
 
 
 from .wfi import WFI_Properties
-
+from .sutr import *
 
 import os
 ROMSIM_PACKAGE_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -28,9 +28,10 @@ def bin_image(img, binsize):
 
 class RomanImage(object):
     
-    def __init__(self,stars=None,bandpass='F146',detector='SCA01',star_type='K0V',
-                 exptime=47.,nstars=300, detector_size=(4096,4096),
-                 psf_fits=None,n_min_zodiacal_background=5.,
+    def __init__(self,stars=None,bandpass='F146',detector='SCA07',
+                 star_type='M0V',
+                 exptime=54.,nstars=300, detector_size=(4096,4096),
+                 psf_fits=None, n_min_zodiacal_background=5.,
                  buffer=4, use_oversampled=False, subframe=False,
                  coords=('17:45:41.01','-29:56:10.13') ):
         
@@ -38,7 +39,6 @@ class RomanImage(object):
         #    self.psf_fits = fits.open(psf_datadir+'wim_psf_'+star_type.lower()+'_fullset/WFI_PSF_F146_'+detector+'_x2048_y2048_j008mas_'+star_type.upper()+'_o.fits')
         #else:
         #    self.psf_fits=fits.open(psf_fits)
-
 
 
         self.wfiprops = WFI_Properties()
@@ -114,7 +114,7 @@ class RomanImage(object):
     def _get_poisson_noise(self, expectation, shape=None):
         return np.random.poisson(expectation, size=shape).astype(float)
     
-    def _get_dark_noise(self, image, exptime=1):
+    def _get_dark_noise(self, image, exptime=1.):
         darknoise = self.wfiprops.dark_current
         return np.random.poisson(darknoise*exptime+np.zeros_like(image) )
 
@@ -140,7 +140,7 @@ class RomanImage(object):
         
 
 
-    def _make_expected_source_image(self, oversample=False, star_list=None):
+    def _make_expected_source_image(self, oversample=False, star_list=None, trim_psf_kernel=True):
 
         if not(self.subframe == False):
             detector_size = self.subframe
@@ -149,9 +149,17 @@ class RomanImage(object):
 
         
         if oversample:
-            image = np.zeros((detector_size[0]*self.psf_oversample_factor, 
+            image = np.zeros((detector_size[0]*self.psf_oversample_factor, \
                               detector_size[1]*self.psf_oversample_factor) )
+            
             kernel = self.psf_model
+
+            if trim_psf_kernel:
+                dx,dy = image.shape
+
+                mid_x, mid_y = kernel.shape[0]//2, kernel.shape[1]//2
+                kernel = kernel[mid_x-dx//2:mid_x+dx//2,mid_y-dy//2:mid_y+dy//2]
+                
         
         else:
             image = np.zeros(detector_size)
@@ -179,21 +187,28 @@ class RomanImage(object):
         print('... Added {} Stars ...'.format(nstar))
 
         print('... Performing PSF Convolution ... ')
+
         expected_source_image = fftconvolve(image, kernel, mode='same')
+
+        sky_expectation = self.n_min_zodiacal_background * self.wfiprops.minzodi_background
+        sky_expectation += self.wfiprops.thermal_background
         
         if oversample:
-            return bin_image(expected_source_image, self.psf_oversample_factor)
+            
+            return bin_image(expected_source_image, self.psf_oversample_factor) + sky_expectation
         else:
-            return expected_source_image
+            return expected_source_image + sky_expectation
 
 
-    def _make_frames_ramp_sampling(self, expected_source_flux, n_reads):
 
         '''
+    def _make_frames_ramp_sampling(self, expected_source_flux, n_reads):
+
+        
         expected_flux_image: nd array of same shape as image
         The expected number of electrons for 1 sec of integration
         
-        '''
+        
         
         # add small number to avoid computer rounding giving negative numbers
         expected_source_flux += 1e-10
@@ -242,10 +257,17 @@ class RomanImage(object):
         #frame_times = (np.arange(0, n_reads)+1)*readout_time
         
         return frames
+        
 
-
+        
     def _create_resultant_frames(self, frames, ngroup=2, n_resultant_frames=None):
 
+
+
+        resultants = combine_read_frames_into_resultant_frames(read_frames, multiaccum_table,
+                                                               saturation_limit=self.saturation_limit)
+
+        
         if n_resultant_frames is None:
             n_resultant_frames = frames.shape[0]//ngroup
 
@@ -279,17 +301,21 @@ class RomanImage(object):
             for n in range(remainder):
                 resultant_frames.insert(n, frames[n,:,:])
                 group_times.insert(n, frame_times[n])
+       
                 
                     
 
-        return np.array(resultant_frames), np.array(group_times)
+        return np.array(resultants), np.array(group_times)
+       '''
 
-
+    '''
     def _measure_rate_slopes(self, resultant_frames, group_times):
 
+        
         nframes, n_x, n_y = resultant_frames.shape
 
         rate_slope_image = np.zeros((n_x,n_y))
+
 
         #group_exptime = self.wfiprops.readout_time * ngroup
         #group_times = (np.arange(nframes) + 0.5)*group_exptime
@@ -345,11 +371,11 @@ class RomanImage(object):
                 elif sum(not_saturated)==2:
                     rate = (accumulated_charge[1]-accumulated_charge[0])/(group_times[1]-group_times[0])
                     
-                elif sum(not_saturated)==1:
+                #elif sum(not_saturated)==1:
 
-                    rate = (accumulated_charge[0]-self.wfiprops.bias)/self.wfiprops.readout_time
+                #    rate = (accumulated_charge[0]-self.wfiprops.bias)/self.wfiprops.readout_time
 
-                elif sum(not_saturated)==0:
+                elif sum(not_saturated)<=1:
                     rate = np.nan
 
                 rate_slope_image[xi,yi]=rate
@@ -357,61 +383,62 @@ class RomanImage(object):
                 #if not(rate>10):
                 #    print(accumulated_charge[1:]-accumulated_charge[:-1], 3.04*rate)
 
+        
 
+        rate_slope_image = measure_rate_slopes(resultant_frames, multiaccum_table, saturation_limit, read_noise)
+
+        
         return rate_slope_image
+    '''
     
     
     def _make_stellar_image(self, bandpass, exptime, star_list=None,
-                            oversample=False, ngroup=2,read_style='ramp'):
+                            oversample=True, multiaccum_table=None,read_style='ramp',trim_psf_kernel=False):
 
 
         self.wfiprops.get_bandpass_properties(bandpass)
         readtime = self.wfiprops.readout_time
 
-        expected_source_flux = self._make_expected_source_image(oversample=oversample, star_list=star_list)
+        expected_source_flux = self._make_expected_source_image(oversample=oversample, star_list=star_list,trim_psf_kernel=trim_psf_kernel)
+            
+        saturation_limit = self.wfiprops.saturation_limit
+        read_noise = self.wfiprops.read_noise
 
         
-        if read_style=='fowler':
-                        
+        if read_style=='ramp':
             
-            print('... Adding Poisson Noise ... ')
-            first_readout = np.random.poisson(lam=readtime*expected_source_flux).astype(float)
-            
-            saturation_mask = first_readout>self.wfiprops.saturation_limit
-            
-            # Adjust poisson noise for pixels that saturate on final readout but not first
-            pixel_saturation_time = self.wfiprops.saturation_limit/(first_readout/readtime) 
-            poisson_scaling_factor = exptime/pixel_saturation_time
-            poisson_scaling_factor[poisson_scaling_factor<1.] = 1.
-            
-            
-            second_readout=np.random.poisson(lam=expected_source_flux*exptime/poisson_scaling_factor).astype(float)
-            second_readout*=poisson_scaling_factor
-                        
-            second_readout[saturation_mask] = self.wfiprops.saturation_limit*(exptime/readtime)
-            first_readout[saturation_mask] = self.wfiprops.saturation_limit
-            
-            source_image = (second_readout-first_readout) * (exptime/(exptime-readtime))
-            
-        
-        elif read_style=='ramp':
-            
-            n_reads = int(exptime//readtime)
+            n_reads = sum(multiaccum_table)
             #n_resultant_frames = 6
             #n_group = int(n_reads//n_resultant_frames)
+            
 
-            print('... Simulating Individual Frames ...')
-            simulated_frames = self._make_frames_ramp_sampling(expected_source_flux, n_reads=n_reads)
+            #print('... Simulating Individual Frames ...')
+            #simulated_frames = self._make_frames_ramp_sampling(expected_source_flux, n_reads=n_reads)
 
-            resultant_frames, group_times = self._create_resultant_frames(simulated_frames, ngroup=ngroup, n_resultant_frames=None)
+            simulated_frames = get_ramp_samples(expected_source_flux, n_reads, readtime,
+                                                read_noise=read_noise,
+                                                saturation_limit=saturation_limit)
+
+            
+            #resultant_frames, group_times = self._create_resultant_frames(simulated_frames, ngroup=ngroup, n_resultant_frames=None)
 
 
-            print('... Measuring Count Rate Slopes ...')
-            rate_slope_image = self._measure_rate_slopes(resultant_frames, group_times)
+            resultant_frames = combine_read_frames_into_resultant_frames(simulated_frames,
+                                                                         multiaccum_table,
+                                                                         saturation_limit=saturation_limit)
+
+            #print('... Measuring Count Rate Slopes ...')
+            rate_slope_image = measure_rate_slopes(resultant_frames, multiaccum_table,
+                                                   saturation_limit=saturation_limit,
+                                                   read_noise=read_noise,
+                                                   frametime=readtime)
+            
             saturation_mask = np.isnan(rate_slope_image)
 
-            source_image = rate_slope_image
-            source_image[saturation_mask] = np.nan #self.wfiprops.saturation_limit#/self.wfiprops.readout_time            
+            return rate_slope_image, saturation_mask
+        
+            #source_image = rate_slope_image
+            #source_image[saturation_mask] = np.nan #self.wfiprops.saturation_limit#/self.wfiprops.readout_time            
 
                 
         elif read_style=='ccd':
@@ -466,7 +493,6 @@ class RomanImage(object):
         hdr['NROW'] = (self.subframe[1], 'number of rows in image')
         hdr['DETECTOR'] = (self.detector, 'detector assembly')
         
-
         hdr['TSTART'] = (t.to_value('jd'), 'observation start in Julian Date')
         hdr['TEND'] = ((t+texp).to_value('jd'), 'observation end in Julian Date')
         hdr['DATE-OBS'] = (t.to_value('isot'), 'observation start in UTC Calendar Date')
@@ -477,7 +503,7 @@ class RomanImage(object):
     
     
     
-    def make_realistic_image(self, bandpass, exptime, oversample=False, star_list=None, read_style='ramp', return_err=False):
+    def make_realistic_image(self, bandpass, exptime=None, oversample=False, star_list=None, read_style='ramp', return_err=False, multiaccum_table=None,trim_psf_kernel=False):
 
 
         if bandpass != self.wfiprops.bandpass:
@@ -500,7 +526,7 @@ class RomanImage(object):
                     self.stars = star_list
 
         
-        image, saturation_mask = self._make_stellar_image(bandpass,exptime,oversample=oversample, star_list=None, read_style=read_style)
+        image, saturation_mask = self._make_stellar_image(bandpass,exptime,oversample=oversample, star_list=None, read_style=read_style,multiaccum_table=multiaccum_table,trim_psf_kernel=trim_psf_kernel)
 
 
         if read_style=='ramp':
@@ -533,10 +559,14 @@ class RomanImage(object):
     
     
     
-    def create_fits_image(self, data_dir, bandpass, exptime, obs_time, oversample=True, star_list=None, read_style='ramp', return_err=False, time_format='isot', overwrite_fits=False, frameno=None, ):
+    def create_fits_image(self, data_dir, bandpass, exptime, obs_time, multiaccum_table=None, oversample=True, star_list=None, read_style='ramp', return_err=False, time_format='isot', overwrite_fits=False, frameno=None, ):
         
-        
-        data = self.make_realistic_image(bandpass, exptime, oversample, star_list, read_style, return_err)
+        if read_style == 'ramp':
+            exptime = sum(multiaccum_table) * self.wfiprops.readout_time
+            
+        data = self.make_realistic_image(bandpass=bandpass, exptime=exptime, oversample=oversample,
+                                         star_list=star_list, read_style=read_style,
+                                         return_err=return_err, multiaccum_table=multiaccum_table)
         
         if return_err:
             img,img_err = data
