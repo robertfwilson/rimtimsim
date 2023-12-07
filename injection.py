@@ -2,10 +2,12 @@ import batman
 import pandas as pd
 from tqdm import tqdm
 
-
 from scipy.interpolate import griddata
 
-from gadfly import StellarOscillatorKernel, Hyperparameters, GaussianProcess, PowerSpectrum
+try:
+    from gadfly import StellarOscillatorKernel, Hyperparameters, GaussianProcess, PowerSpectrum
+except ImportError:
+    print('Install gadfly (https://gadfly-astro.readthedocs.io) to use Asteroseismology Functionality')
 
 from .utils import *
 
@@ -14,8 +16,6 @@ rsun = 695500000.0
 G = 6.67384e-11
 AU = 149597870700.0
 Mbol_sun=4.74
-
-
 
 
 class TimeSeries(object):
@@ -30,7 +30,6 @@ class TimeSeries(object):
 
         if time is None:
             
-            self.exposure = exposure * u.s
             self.baseline = baseline * u.day
             self.cadence = cadence * u.minute
 
@@ -38,7 +37,8 @@ class TimeSeries(object):
 
         else:
             self.time = time
-            
+
+        self.exposure = exposure * u.s
         self.d_flux = np.zeros_like(self.time)
         self.bandpass=bandpass
         self.mag=mag
@@ -48,12 +48,10 @@ class TimeSeries(object):
         return -2.5*np.log10(1.+self.d_flux)
 
 
-
-
 class SeismologyTimeSeries(TimeSeries):
 
 
-    def set_stellar_parameters(self, Radius, Mass, Teff, Lum=None, Mbol=None, bandpass='W146'):
+    def set_stellar_parameters(self, Radius, Mass, Teff, Lum=None, Mbol=None, bandpass='F146'):
         
         self.mstar = Mass * u.M_sun
         self.rstar = Radius * u.R_sun
@@ -79,7 +77,7 @@ class SeismologyTimeSeries(TimeSeries):
         temperature=self.teff,
         luminosity=self.lum,
         name = f"star_{i}",
-        bandpass="WFIRST/WFI."+self.bandpass )
+        bandpass="WFIRST/WFI.W146" )
 
         # generate a celerite2-compatible kernel
         kernel = StellarOscillatorKernel(hp, texp=self.exposure)
@@ -136,17 +134,30 @@ class TransitTimeSeries(TimeSeries):
             self.lum = Lum * u.L_sun
 
 
-    def set_planet_parameters(self, period, planetRadius, t0=None, ecc=0., omega=0., impact=0. ):
+    def set_planet_parameters(self, period, planetRadius, t0, ecc=0., omega=0., impact=0.,):
 
-        self.rplanet = planetRadius * u.earthRad
-        self.orbital_period = period * u.day
-        self.ecc=ecc
-        self.omega=omega * u.deg
-        self.impact=impact
-        self.t0=t0
+        if hasattr(period, "__len__"):
+            self.nplanets = len(period)
+        else:
+            self.nplanets=1
+
+        if self.nplanets>1:
+            self.rplanet = np.array(planetRadius) * u.earthRad
+            self.orbital_period = np.array(period) * u.day
+            self.ecc= np.array(ecc)
+            self.omega= np.array(omega) * u.deg
+            self.impact= np.array(impact)
+            self.t0= np.array(t0)
+        else:
+            self.rplanet = planetRadius * u.earthRad
+            self.orbital_period = period * u.day
+            self.ecc=ecc
+            self.omega=omega * u.deg
+            self.impact=impact
+            self.t0=t0
 
 
-    def _calc_batman_parameters(self):
+    def _calc_batman_parameters(self, n=0):
 
         self.model_params.rp = (self.rplanet.to(u.R_sun).value / self.rstar.to(u.R_sun).value)
         self.model_params.per = self.orbital_period.value
@@ -182,22 +193,42 @@ class TransitTimeSeries(TimeSeries):
         self._calc_batman_parameters()
 
         simulated_lc = self.model.light_curve(self.model_params)-1.
+
         
         self.d_flux = simulated_lc
 
         return simulated_lc
 
+    def get_lightcurve(self):
+
+        self.get_transit_lightcurve()
 
 
 
-class MultiStarTimeSeries(TimeSeries):
+
+class DetachedEBTimeSeries(TimeSeries):
+
     pass
 
 
-class StellarTimeSeries(TransitTimeSeries,  SeismologyTimeSeries):    
+class BlendedTimeSeries(TimeSeries):
     
     pass
 
+
+class StarTimeSeries(TransitTimeSeries, SeismologyTimeSeries):    
+
+    
+    def get_total_lightcurve(self):
+        
+        delta_flux = self.get_transit_lightcurve()
+        delta_flux += self.get_seismology_lightcurve()
+
+        self.d_flux = delta_flux
+        
+        return delta_flux
+        
+    
 
     
 
